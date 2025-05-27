@@ -3,10 +3,11 @@ package main
 import (
     "log"
     "net"
+    "fmt"
 )
 
 func main() {
-    addr := ":53" // DNS port (requires admin privileges on Windows)
+    addr := ":53" // DNS port (Use powershell admin)
     conn, err := net.ListenPacket("udp", addr)
     if err != nil {
         log.Fatalf("Failed to bind: %v", err)
@@ -35,11 +36,26 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
         return
     }
 
-    domain := normalizeDomain(question.Name)
-    log.Printf("Received query for: %s", domain)
+    recordType := map[uint16]string{
+        1:  "A",
+        28: "AAAA",
+        15: "MX",
+        5:  "CNAME"
+        12: "PTR",
+    }
 
-    if resp, found := cache.Get(domain); found {
-        log.Printf("Cache hit: %s", domain)
+    rtypeName, ok := recordType[question.Type]
+    if !ok {
+        rtypeName = fmt.Sprintf("TYPE%d", question.Type)
+    }
+
+    domain := normalizeDomain(question.Name)
+    key := fmt.Sprintf("%s:%d", domain, question.Type)
+
+    log.Printf("Received query for: %s (%s)", domain, rtypeName)
+
+    if resp, found := cache.Get(key); found {
+        log.Printf("Cache hit: %s (%s)", domain, rtypeName)
         conn.WriteTo(resp, addr)
         return
     }
@@ -51,11 +67,12 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
     }
 
     ttl := extractTTL(resp)
-    cache.Set(domain, resp, ttl)
-    log.Printf("Cache set: %s (TTL: %d)", domain, ttl)
+    cache.Set(key, resp, ttl)
+    log.Printf("Cache set: %s (%s) (TTL: %d)", domain, rtypeName, ttl)
 
     conn.WriteTo(resp, addr)
 }
+
 
 func forwardToUpstream(query []byte) ([]byte, error) {
     server := "8.8.8.8:53"
