@@ -177,3 +177,56 @@ func buildDNSQuery(name string, qtype uint16, qclass uint16) []byte {
     return append(append(header, qname...), question...)
 }
 
+func mergeDNSResponses(base []byte, extra []byte) []byte {
+    if len(base) < 12 || len(extra) < 12 {
+        return base
+    }
+
+    
+    baseAn := binary.BigEndian.Uint16(base[6:8])
+    extraAn := binary.BigEndian.Uint16(extra[6:8])
+
+    
+    qdCount := int(binary.BigEndian.Uint16(base[4:6]))
+    offset := 12
+    for i := 0; i < qdCount; i++ {
+        for {
+            length := int(base[offset])
+            offset++
+            if length == 0 {
+                break
+            }
+            offset += length
+        }
+        offset += 4 
+    }
+
+   
+    extraOffset := 12
+    extraQd := int(binary.BigEndian.Uint16(extra[4:6]))
+    for i := 0; i < extraQd; i++ {
+        for {
+            length := int(extra[extraOffset])
+            extraOffset++
+            if length == 0 {
+                break
+            }
+            extraOffset += length
+        }
+        extraOffset += 4
+    }
+
+    
+    extraAnswers := extra[extraOffset:]
+
+    
+    merged := append(base, extraAnswers...)
+
+    
+    totalAnswers := baseAn + extraAn
+    binary.BigEndian.PutUint16(merged[6:8], totalAnswers)
+
+    return merged
+}
+
+
