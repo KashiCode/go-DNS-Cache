@@ -40,7 +40,7 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
         1:  "A",
         28: "AAAA",
         15: "MX",
-        5:  "CNAME"
+        5:  "CNAME",
         12: "PTR",
     }
 
@@ -54,15 +54,17 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
 
     log.Printf("Received query for: %s (%s)", domain, rtypeName)
 
+    
     if resp, found := cache.Get(key); found {
         log.Printf("Cache hit: %s (%s)", domain, rtypeName)
         conn.WriteTo(resp, addr)
         return
     }
 
+    
     resp, err := forwardToUpstream(req)
     if err != nil {
-        log.Printf("Failed to forward to upstream: %v", err)
+        log.Printf("Forward failed: %v", err)
         return
     }
 
@@ -70,8 +72,33 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
     cache.Set(key, resp, ttl)
     log.Printf("Cache set: %s (%s) (TTL: %d)", domain, rtypeName, ttl)
 
+    
+    cname, ok := extractCNAME(resp)
+    if ok {
+        cname = normalizeDomain(cname)
+        cnameKey := fmt.Sprintf("%s:%d", cname, question.Type)
+
+        
+        if _, found := cache.Get(cnameKey); found {
+            log.Printf("CNAME follow cache hit: %s", cname)
+            // TODO: merge resp + finalResp.
+            conn.WriteTo(resp, addr)
+            return
+        }
+
+        log.Printf("CNAME follow: querying %s", cname)
+        cnameQuery := buildDNSQuery(cname, question.Type, question.Class)
+        cnameResp, err := forwardToUpstream(cnameQuery)
+        if err == nil {
+            ttl := extractTTL(cnameResp)
+            cache.Set(cnameKey, cnameResp, ttl)
+            log.Printf("Cache set: %s (CNAME target) (TTL: %d)", cname, ttl)
+        }
+    }
+
     conn.WriteTo(resp, addr)
 }
+
 
 
 func forwardToUpstream(query []byte) ([]byte, error) {
