@@ -30,7 +30,7 @@ func main() {
 }
 
 func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCache) {
-    _, question, err := parseDNSQuery(req)
+    _, question, err := parseDNSQuery(req) //update to header to access. 
     if err != nil {
         log.Printf("Bad DNS query: %v", err)
         return
@@ -79,10 +79,10 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
         cnameKey := fmt.Sprintf("%s:%d", cname, question.Type)
 
         
-        if _, found := cache.Get(cnameKey); found {
+        if finalResp, found := cache.Get(cnameKey); found {
             log.Printf("CNAME follow cache hit: %s", cname)
-            // TODO: merge resp + finalResp.
-            conn.WriteTo(resp, addr)
+            merged := mergeDNSResponses(resp, finalResp)
+            conn.WriteTo(merged, addr)
             return
         }
 
