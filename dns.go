@@ -3,7 +3,6 @@ package main
 import (
     "encoding/binary"
     "fmt"
-    "strings"
 )
 
 
@@ -49,23 +48,3 @@ func parseDNSQuery(data []byte) (DNSHeader, DNSQuestion, error) {
     return header, question, nil
 }
 
-func parseQName(data []byte, offset int) (string, int) {
-    labels := []string{}
-    for {
-        if offset >= len(data) {
-            return "", offset
-        }
-        length := int(data[offset])
-        if length == 0 {
-            offset++
-            break
-        }
-        offset++
-        if offset+length > len(data) {
-            return "", offset
-        }
-        labels = append(labels, string(data[offset:offset+length]))
-        offset += length
-    }
-    return strings.Join(labels, "."), offset
-}
