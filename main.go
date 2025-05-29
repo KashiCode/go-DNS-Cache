@@ -1,33 +1,130 @@
 package main
 
 import (
+    "encoding/binary"
+    "fmt"
     "log"
     "net"
-    "fmt"
 )
 
 func main() {
-    addr := ":53" // DNS port (Use powershell admin)
-    conn, err := net.ListenPacket("udp", addr)
+    cache := NewCache()
+
+    go startTCPServer(cache) // Start TCP listener
+    startUDPServer(cache)    // Start UDP listener 
+}
+
+
+func startUDPServer(cache *DNSCache) {
+    conn, err := net.ListenPacket("udp", "0.0.0.0:8053")
     if err != nil {
-        log.Fatalf("Failed to bind: %v", err)
+        log.Fatalf("UDP bind failed: %v", err)
     }
     defer conn.Close()
-    log.Printf("DNS Server listening on %s", addr)
-
-    cache := NewCache()
+    log.Println("UDP DNS server listening on :8053")
 
     buf := make([]byte, 512)
     for {
-        n, clientAddr, err := conn.ReadFrom(buf)
+        n, addr, err := conn.ReadFrom(buf)
         if err != nil {
-            log.Printf("Error reading: %v", err)
+            log.Printf("UDP read error: %v", err)
             continue
         }
-
-        go handleDNSQuery(conn, clientAddr, buf[:n], cache)
+        go handleDNSQuery(conn, addr, buf[:n], cache)
     }
 }
+
+
+func startTCPServer(cache *DNSCache) {
+    ln, err := net.Listen("tcp", "0.0.0.0:8053")
+    if err != nil {
+        log.Fatalf("Failed to start TCP server: %v", err)
+    }
+    log.Println("TCP DNS server listening on :8053")
+
+    for {
+        conn, err := ln.Accept()
+        if err != nil {
+            log.Printf("Failed to accept TCP connection: %v", err)
+            continue
+        }
+        go handleTCPConnection(conn, cache)
+    }
+}
+
+
+func handleTCPConnection(conn net.Conn, cache *DNSCache) {
+    defer conn.Close()
+
+    lengthBuf := make([]byte, 2)
+    _, err := conn.Read(lengthBuf)
+    if err != nil {
+        log.Printf("TCP read (length) error: %v", err)
+        return
+    }
+
+    length := binary.BigEndian.Uint16(lengthBuf)
+    if length == 0 || length > 4096 {
+        log.Printf("TCP length too large or invalid: %d", length)
+        return
+    }
+
+    data := make([]byte, length)
+    _, err = conn.Read(data)
+    if err != nil {
+        log.Printf("TCP read (data) error: %v", err)
+        return
+    }
+
+    response := handleDNSQueryTCP(data, cache)
+    if response == nil {
+        return
+    }
+
+    respLen := make([]byte, 2)
+    binary.BigEndian.PutUint16(respLen, uint16(len(response)))
+    conn.Write(append(respLen, response...))
+}
+
+//Handles DNS Query (dig)
+func handleDNSQueryTCP(req []byte, cache *DNSCache) []byte {
+    _, question, err := parseDNSQuery(req)
+    if err != nil {
+        log.Printf("Bad DNS TCP query: %v", err)
+        return nil
+    }
+
+    rtype := fmt.Sprintf("TYPE%d", question.Type)
+    domain := normalizeDomain(question.Name)
+    key := fmt.Sprintf("%s:%d", domain, question.Type)
+
+    log.Printf("TCP: Received query for: %s (%s)", domain, rtype)
+
+    if resp, found := cache.Get(key); found {
+        log.Printf("TCP: Cache hit: %s (%s)", domain, rtype)
+        
+        fixedResp := make([]byte, len(resp))
+        copy(fixedResp, resp)
+        copy(fixedResp[0:2], req[0:2]) // overwrite transaction ID
+        return fixedResp
+    }
+
+    resp, err := forwardToUpstream(req)
+    if err != nil {
+        log.Printf("TCP: Forward failed: %v", err)
+        return nil
+    }
+
+    
+    copy(resp[0:2], req[0:2]) 
+
+    ttl := extractTTL(resp)
+    cache.Set(key, resp, ttl)
+    log.Printf("TCP: Cache set: %s (%s) (TTL: %d)", domain, rtype, ttl)
+
+    return resp
+}
+
 
 func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCache) {
     _, question, err := parseDNSQuery(req) //update to header to access. 
