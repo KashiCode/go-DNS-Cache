@@ -9,13 +9,14 @@ import (
 
 func main() {
     cache := NewCache()
+    deduper := NewDeduper()
 
-    go startTCPServer(cache) // Start TCP listener
-    startUDPServer(cache)    // Start UDP listener 
+    go startTCPServer(cache,deduper) // Start TCP listener
+    startUDPServer(cache,deduper)    // Start UDP listener 
 }
 
 
-func startUDPServer(cache *DNSCache) {
+func startUDPServer(cache *DNSCache, deduper *Deduper) {
     conn, err := net.ListenPacket("udp", "0.0.0.0:8053")
     if err != nil {
         log.Fatalf("UDP bind failed: %v", err)
@@ -30,12 +31,12 @@ func startUDPServer(cache *DNSCache) {
             log.Printf("UDP read error: %v", err)
             continue
         }
-        go handleDNSQuery(conn, addr, buf[:n], cache)
+        go handleDNSQuery(conn, addr, buf[:n], cache, deduper)
     }
 }
 
 
-func startTCPServer(cache *DNSCache) {
+func startTCPServer(cache *DNSCache, deduper *Deduper) {
     ln, err := net.Listen("tcp", "0.0.0.0:8053")
     if err != nil {
         log.Fatalf("Failed to start TCP server: %v", err)
@@ -48,12 +49,12 @@ func startTCPServer(cache *DNSCache) {
             log.Printf("Failed to accept TCP connection: %v", err)
             continue
         }
-        go handleTCPConnection(conn, cache)
+        go handleTCPConnection(conn, cache, deduper)
     }
 }
 
 
-func handleTCPConnection(conn net.Conn, cache *DNSCache) {
+func handleTCPConnection(conn net.Conn, cache *DNSCache, deduper *Deduper) {
     defer conn.Close()
 
     lengthBuf := make([]byte, 2)
@@ -76,7 +77,7 @@ func handleTCPConnection(conn net.Conn, cache *DNSCache) {
         return
     }
 
-    response := handleDNSQueryTCP(data, cache)
+    response := handleDNSQueryTCP(data, cache, deduper)
     if response == nil {
         return
     }
@@ -87,7 +88,7 @@ func handleTCPConnection(conn net.Conn, cache *DNSCache) {
 }
 
 //Handles DNS Query (dig)
-func handleDNSQueryTCP(req []byte, cache *DNSCache) []byte {
+func handleDNSQueryTCP(req []byte, cache *DNSCache, deduper *Deduper) []byte {
     _, question, err := parseDNSQuery(req)
     if err != nil {
         log.Printf("Bad DNS TCP query: %v", err)
@@ -109,12 +110,17 @@ func handleDNSQueryTCP(req []byte, cache *DNSCache) []byte {
         return fixedResp
     }
 
-    resp, err := forwardToUpstream(req)
+    resp, err := deduper.Do(key, func() ([]byte, error) {
+    return forwardToUpstream(req)
+    })
     if err != nil {
         log.Printf("TCP: Forward failed: %v", err)
-        return nil
+        return
     }
 
+    if resp == nil {
+        return
+    }
     
     copy(resp[0:2], req[0:2]) 
 
@@ -126,7 +132,7 @@ func handleDNSQueryTCP(req []byte, cache *DNSCache) []byte {
 }
 
 
-func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCache) {
+func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCache, deduper *Deduper) {
     _, question, err := parseDNSQuery(req) //update to header to access. 
     if err != nil {
         log.Printf("Bad DNS query: %v", err)
@@ -158,12 +164,17 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
         return
     }
 
-    
-    resp, err := forwardToUpstream(req)
+    resp, err := deduper.Do(key, func() ([]byte, error) {
+    return forwardToUpstream(req)
+    })
     if err != nil {
         log.Printf("Forward failed: %v", err)
         return
     }
+    if resp == nil {
+        return
+    }
+
 
     ttl := extractTTL(resp)
     cache.Set(key, resp, ttl)
