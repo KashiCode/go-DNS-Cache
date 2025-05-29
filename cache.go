@@ -46,3 +46,20 @@ func (c *DNSCache) Set(key string, data []byte, ttl uint32) {
         ExpiresAt: time.Now().Add(time.Duration(ttl) * time.Second),
     }
 }
+
+func (c *DNSCache) StartEvictionLoop(interval time.Duration) {
+    go func() {
+        for {
+            time.Sleep(interval)
+            c.mu.Lock()
+            now := time.Now()
+            for key, entry := range c.entries {
+                if now.After(entry.ExpiresAt) {
+                    delete(c.entries, key)
+                }
+            }
+            c.mu.Unlock()
+        }
+    }()
+}
+

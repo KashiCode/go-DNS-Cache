@@ -10,6 +10,8 @@ import (
 func main() {
     cache := NewCache()
     deduper := NewDeduper()
+    cache.StartEvictionLoop(1 * time.Minute)
+    log.Println("Starting DNS server...")
 
     go startTCPServer(cache,deduper) // Start TCP listener
     startUDPServer(cache,deduper)    // Start UDP listener 
