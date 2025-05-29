@@ -145,6 +145,8 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
         15: "MX",
         5:  "CNAME",
         12: "PTR",
+        2:  "NS",
+        16: "TXT",
     }
 
     rtypeName, ok := recordType[question.Type]
