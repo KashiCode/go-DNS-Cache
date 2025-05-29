@@ -79,7 +79,7 @@ func handleTCPConnection(conn net.Conn, cache *DNSCache, deduper *Deduper) {
 
     response := handleDNSQueryTCP(data, cache, deduper)
     if response == nil {
-        return
+        return 
     }
 
     respLen := make([]byte, 2)
@@ -115,11 +115,11 @@ func handleDNSQueryTCP(req []byte, cache *DNSCache, deduper *Deduper) []byte {
     })
     if err != nil {
         log.Printf("TCP: Forward failed: %v", err)
-        return
+        return nil
     }
 
     if resp == nil {
-        return
+        return nil
     }
     
     copy(resp[0:2], req[0:2]) 
