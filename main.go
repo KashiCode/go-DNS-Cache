@@ -5,6 +5,7 @@ import (
     "fmt"
     "log"
     "net"
+    "time"
 )
 
 func main() {
@@ -26,7 +27,7 @@ func startUDPServer(cache *DNSCache, deduper *Deduper) {
     defer conn.Close()
     log.Println("UDP DNS server listening on :8053")
 
-    buf := make([]byte, 512)
+    buf := make([]byte, 4096)
     for {
         n, addr, err := conn.ReadFrom(buf)
         if err != nil {
@@ -113,7 +114,7 @@ func handleDNSQueryTCP(req []byte, cache *DNSCache, deduper *Deduper) []byte {
     }
 
     resp, err := deduper.Do(key, func() ([]byte, error) {
-    return forwardToUpstream(req)
+    return resolveRecursively(req)
     })
     if err != nil {
         log.Printf("TCP: Forward failed: %v", err)
@@ -169,7 +170,7 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
     }
 
     resp, err := deduper.Do(key, func() ([]byte, error) {
-    return forwardToUpstream(req)
+    return resolveRecursively(req)
     })
     if err != nil {
         log.Printf("Forward failed: %v", err)
@@ -200,7 +201,7 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
 
         log.Printf("CNAME follow: querying %s", cname)
         cnameQuery := buildDNSQuery(cname, question.Type, question.Class)
-        cnameResp, err := forwardToUpstream(cnameQuery)
+        cnameResp, err := resolveRecursively(cnameQuery)
         if err == nil {
             ttl := extractTTL(cnameResp)
             cache.Set(cnameKey, cnameResp, ttl)
@@ -209,27 +210,4 @@ func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCa
     }
 
     conn.WriteTo(resp, addr)
-}
-
-
-
-func forwardToUpstream(query []byte) ([]byte, error) {
-    server := "8.8.8.8:53"
-    conn, err := net.Dial("udp", server)
-    if err != nil {
-        return nil, err
-    }
-    defer conn.Close()
-
-    _, err = conn.Write(query)
-    if err != nil {
-        return nil, err
-    }
-
-    buf := make([]byte, 512)
-    n, err := conn.Read(buf)
-    if err != nil {
-        return nil, err
-    }
-    return buf[:n], nil
 }
