@@ -1,3 +1,4 @@
+// Error checking: No changes made (code function)
 package main
 
 import (
