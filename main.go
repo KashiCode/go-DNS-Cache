@@ -87,7 +87,7 @@ func tcpServe(c net.Conn, cache *DNSCache, d *Deduper) {
 func handleQuery(req []byte, cache *DNSCache, d *Deduper) []byte {
 	start := time.Now()
 
-	
+	// We only need the parsed question for logging & cache-key purposes.
 	_, q, err := parseDNSQuery(req)
 	if err != nil {
 		return nil
@@ -96,10 +96,9 @@ func handleQuery(req []byte, cache *DNSCache, d *Deduper) []byte {
 
 	
 	if resp, ok := cache.Get(key); ok {
-		fixed := append([]byte(nil), resp...) 
-		copy(fixed[0:2], req[0:2])            
+		reply := patchHeader(resp, req)
 		log.Printf("CACHE  %s  type %d  %v", q.Name, q.Type, time.Since(start))
-		return fixed
+		return reply
 	}
 
 	
@@ -114,41 +113,34 @@ func handleQuery(req []byte, cache *DNSCache, d *Deduper) []byte {
 	
 	if resp == nil {
 		if cached, ok := cache.Get(key); ok {
-			fixed := append([]byte(nil), cached...)
-			copy(fixed[0:2], req[0:2])
+			reply := patchHeader(cached, req)
 			log.Printf("CACHE  %s  type %d  %v  (post-dedupe)", q.Name, q.Type, time.Since(start))
-			return fixed
+			return reply
 		}
-		
 		log.Printf("FAIL   %s  type %d  %v  (pioneer miss)", q.Name, q.Type, time.Since(start))
 		return nil
 	}
 
 	
-	copy(resp[0:2], req[0:2]) 
 	cache.Set(key, resp, extractTTL(resp))
+	reply := patchHeader(resp, req)
+	log.Printf("ANS    %s  type %d  %v", q.Name, q.Type, time.Since(start))
 
-
+	
 	if cn, ok := extractCNAME(resp); ok {
 		cnKey := fmt.Sprintf("%s:%d", normalizeDomain(cn), q.Type)
-
-		
 		if end, ok := cache.Get(cnKey); ok {
 			log.Printf("CNAME  %s → %s  type %d  %v (cache)", q.Name, cn, q.Type, time.Since(start))
-			return mergeDNSResponses(resp, end)
+			return mergeDNSResponses(reply, end)
 		}
-
-		
 		end, err := resolveRecursively(buildDNSQuery(cn, q.Type, q.Class))
 		if err == nil {
 			cache.Set(cnKey, end, extractTTL(end))
 			log.Printf("CNAME  %s → %s  type %d  %v", q.Name, cn, q.Type, time.Since(start))
-			return mergeDNSResponses(resp, end)
+			return mergeDNSResponses(reply, end)
 		}
-		
 	}
 
-	log.Printf("ANS    %s  type %d  %v", q.Name, q.Type, time.Since(start))
-	return resp
+	return reply
 }
 
