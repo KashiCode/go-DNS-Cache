@@ -1,213 +1,122 @@
 package main
 
 import (
-    "encoding/binary"
-    "fmt"
-    "log"
-    "net"
-    "time"
+	"encoding/binary"
+	"fmt"
+	"log"
+	"net"
+	"time"
 )
 
+const listenAddr = "0.0.0.0:8053"
+
 func main() {
-    cache := NewCache()
-    deduper := NewDeduper()
-    cache.StartEvictionLoop(1 * time.Minute)
-    log.Println("Starting DNS server...")
+	cache := NewCache()
+	deduper := NewDeduper()
+	cache.StartEvictionLoop(30 * time.Second)
 
-    go startTCPServer(cache,deduper) // Start TCP listener
-    startUDPServer(cache,deduper)    // Start UDP listener 
+	log.Printf("Recursive DNS server listening on %s (UDP+TCP)", listenAddr)
+	go tcpListener(cache, deduper)
+	udpListener(cache, deduper)
 }
 
 
-func startUDPServer(cache *DNSCache, deduper *Deduper) {
-    conn, err := net.ListenPacket("udp", "0.0.0.0:8053")
-    if err != nil {
-        log.Fatalf("UDP bind failed: %v", err)
-    }
-    defer conn.Close()
-    log.Println("UDP DNS server listening on :8053")
 
-    buf := make([]byte, 4096)
-    for {
-        n, addr, err := conn.ReadFrom(buf)
-        if err != nil {
-            log.Printf("UDP read error: %v", err)
-            continue
-        }
-        go handleDNSQuery(conn, addr, buf[:n], cache, deduper)
-    }
+func udpListener(cache *DNSCache, d *Deduper) {
+	pc, err := net.ListenPacket("udp", listenAddr)
+	if err != nil {
+		log.Fatalf("UDP bind error: %v", err)
+	}
+	defer pc.Close()
+
+	buf := make([]byte, 4096)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			continue
+		}
+		req := append([]byte(nil), buf[:n]...) 
+		go func() {
+			resp := handleQuery(req, cache, d)
+			if resp != nil {
+				_, _ = pc.WriteTo(resp, addr)
+			}
+		}()
+	}
 }
 
 
-func startTCPServer(cache *DNSCache, deduper *Deduper) {
-    ln, err := net.Listen("tcp", "0.0.0.0:8053")
-    if err != nil {
-        log.Fatalf("Failed to start TCP server: %v", err)
-    }
-    log.Println("TCP DNS server listening on :8053")
 
-    for {
-        conn, err := ln.Accept()
-        if err != nil {
-            log.Printf("Failed to accept TCP connection: %v", err)
-            continue
-        }
-        go handleTCPConnection(conn, cache, deduper)
-    }
+func tcpListener(cache *DNSCache, d *Deduper) {
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("TCP listen error: %v", err)
+	}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		go tcpServe(conn, cache, d)
+	}
+}
+
+func tcpServe(c net.Conn, cache *DNSCache, d *Deduper) {
+	defer c.Close()
+
+	lenBuf := make([]byte, 2)
+	if _, err := c.Read(lenBuf); err != nil {
+		return
+	}
+	l := binary.BigEndian.Uint16(lenBuf)
+	req := make([]byte, l)
+	if _, err := c.Read(req); err != nil {
+		return
+	}
+
+	resp := handleQuery(req, cache, d)
+	if resp == nil {
+		return
+	}
+	out := make([]byte, 2)
+	binary.BigEndian.PutUint16(out, uint16(len(resp)))
+	_, _ = c.Write(append(out, resp...))
 }
 
 
-func handleTCPConnection(conn net.Conn, cache *DNSCache, deduper *Deduper) {
-    defer conn.Close()
 
-    lengthBuf := make([]byte, 2)
-    _, err := conn.Read(lengthBuf)
-    if err != nil {
-        log.Printf("TCP read (length) error: %v", err)
-        return
-    }
+func handleQuery(req []byte, cache *DNSCache, d *Deduper) []byte {
+	_, q, err := parseDNSQuery(req)
+	if err != nil {
+		return nil
+	}
 
-    length := binary.BigEndian.Uint16(lengthBuf)
-    if length == 0 || length > 4096 {
-        log.Printf("TCP length too large or invalid: %d", length)
-        return
-    }
+	key := fmt.Sprintf("%s:%d", normalizeDomain(q.Name), q.Type)
+	if resp, ok := cache.Get(key); ok {
+		fixed := append([]byte(nil), resp...)
+		copy(fixed[0:2], req[0:2]) 
+		return fixed
+	}
 
-    data := make([]byte, length)
-    _, err = conn.Read(data)
-    if err != nil {
-        log.Printf("TCP read (data) error: %v", err)
-        return
-    }
+	resp, err := d.Do(key, func() ([]byte, error) { return resolveRecursively(req) })
+	if err != nil || resp == nil {
+		return nil
+	}
+	copy(resp[0:2], req[0:2])
 
-    response := handleDNSQueryTCP(data, cache, deduper)
-    if response == nil {
-        return 
-    }
+	cache.Set(key, resp, extractTTL(resp))
 
-    respLen := make([]byte, 2)
-    binary.BigEndian.PutUint16(respLen, uint16(len(response)))
-    conn.Write(append(respLen, response...))
-}
-
-//Handles DNS Query (dig)
-func handleDNSQueryTCP(req []byte, cache *DNSCache, deduper *Deduper) []byte {
-    _, question, err := parseDNSQuery(req)
-    if err != nil {
-        log.Printf("Bad DNS TCP query: %v", err)
-        return nil
-    }
-
-    rtype := fmt.Sprintf("TYPE%d", question.Type)
-    domain := normalizeDomain(question.Name)
-    key := fmt.Sprintf("%s:%d", domain, question.Type)
-
-    log.Printf("TCP: Received query for: %s (%s)", domain, rtype)
-
-    if resp, found := cache.Get(key); found {
-        log.Printf("TCP: Cache hit: %s (%s)", domain, rtype)
-        
-        fixedResp := make([]byte, len(resp))
-        copy(fixedResp, resp)
-        copy(fixedResp[0:2], req[0:2]) // overwrite transaction ID
-        return fixedResp
-    }
-
-    resp, err := deduper.Do(key, func() ([]byte, error) {
-    return resolveRecursively(req)
-    })
-    if err != nil {
-        log.Printf("TCP: Forward failed: %v", err)
-        return nil
-    }
-
-    if resp == nil {
-        return nil
-    }
-    
-    copy(resp[0:2], req[0:2]) 
-
-    ttl := extractTTL(resp)
-    cache.Set(key, resp, ttl)
-    log.Printf("TCP: Cache set: %s (%s) (TTL: %d)", domain, rtype, ttl)
-
-    return resp
-}
-
-
-func handleDNSQuery(conn net.PacketConn, addr net.Addr, req []byte, cache *DNSCache, deduper *Deduper) {
-    _, question, err := parseDNSQuery(req) //update to header to access. 
-    if err != nil {
-        log.Printf("Bad DNS query: %v", err)
-        return
-    }
-
-    recordType := map[uint16]string{
-        1:  "A",
-        28: "AAAA",
-        15: "MX",
-        5:  "CNAME",
-        12: "PTR",
-        2:  "NS",
-        16: "TXT",
-    }
-
-    rtypeName, ok := recordType[question.Type]
-    if !ok {
-        rtypeName = fmt.Sprintf("TYPE%d", question.Type)
-    }
-
-    domain := normalizeDomain(question.Name)
-    key := fmt.Sprintf("%s:%d", domain, question.Type)
-
-    log.Printf("Received query for: %s (%s)", domain, rtypeName)
-
-    
-    if resp, found := cache.Get(key); found {
-        log.Printf("Cache hit: %s (%s)", domain, rtypeName)
-        conn.WriteTo(resp, addr)
-        return
-    }
-
-    resp, err := deduper.Do(key, func() ([]byte, error) {
-    return resolveRecursively(req)
-    })
-    if err != nil {
-        log.Printf("Forward failed: %v", err)
-        return
-    }
-    if resp == nil {
-        return
-    }
-
-
-    ttl := extractTTL(resp)
-    cache.Set(key, resp, ttl)
-    log.Printf("Cache set: %s (%s) (TTL: %d)", domain, rtypeName, ttl)
-
-    
-    cname, ok := extractCNAME(resp)
-    if ok {
-        cname = normalizeDomain(cname)
-        cnameKey := fmt.Sprintf("%s:%d", cname, question.Type)
-
-        
-        if finalResp, found := cache.Get(cnameKey); found {
-            log.Printf("CNAME follow cache hit: %s", cname)
-            merged := mergeDNSResponses(resp, finalResp)
-            conn.WriteTo(merged, addr)
-            return
-        }
-
-        log.Printf("CNAME follow: querying %s", cname)
-        cnameQuery := buildDNSQuery(cname, question.Type, question.Class)
-        cnameResp, err := resolveRecursively(cnameQuery)
-        if err == nil {
-            ttl := extractTTL(cnameResp)
-            cache.Set(cnameKey, cnameResp, ttl)
-            log.Printf("Cache set: %s (CNAME target) (TTL: %d)", cname, ttl)
-        }
-    }
-
-    conn.WriteTo(resp, addr)
+	
+	if cn, ok := extractCNAME(resp); ok {
+		cnKey := fmt.Sprintf("%s:%d", normalizeDomain(cn), q.Type)
+		if end, ok := cache.Get(cnKey); ok {
+			return mergeDNSResponses(resp, end)
+		}
+		end, err := resolveRecursively(buildDNSQuery(cn, q.Type, q.Class))
+		if err == nil {
+			cache.Set(cnKey, end, extractTTL(end))
+			return mergeDNSResponses(resp, end)
+		}
+	}
+	return resp
 }
