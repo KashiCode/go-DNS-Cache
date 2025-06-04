@@ -1,232 +1,127 @@
 package main
 
 import (
-    "encoding/binary"
-    "strings"
-    "time"
+	"encoding/binary"
+	"strings"
+	"time"
 )
 
 
-func parseQName(data []byte, offset int) (string, int) {
-    labels := []string{}
-    for {
-        if offset >= len(data) {
-            return "", offset
-        }
-        length := int(data[offset])
-        offset++
-        if length == 0 {
-            break
-        }
-        if offset+length > len(data) {
-            return "", offset
-        }
-        labels = append(labels, string(data[offset:offset+length]))
-        offset += length
-    }
-    return strings.Join(labels, "."), offset
+
+func parseQName(b []byte, off int) (string, int) {
+	var lbls []string
+	for {
+		if off >= len(b) {
+			return "", off
+		}
+		l := int(b[off])
+		off++
+		if l == 0 {
+			break
+		}
+		if off+l > len(b) {
+			return "", off
+		}
+		lbls = append(lbls, string(b[off:off+l]))
+		off += l
+	}
+	return strings.Join(lbls, "."), off
+}
+
+func normalizeDomain(s string) string {
+	return strings.TrimSuffix(strings.ToLower(s), ".")
+}
+
+func extractTTL(msg []byte) uint32 {
+	
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		_, off = parseQName(msg, off)
+		off += 4
+	}
+	if off+4 > len(msg) {
+		return 0
+	}
+	return binary.BigEndian.Uint32(msg[off+4 : off+8])
+}
+
+func extractCNAME(msg []byte) (string, bool) {
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	an := int(binary.BigEndian.Uint16(msg[6:8]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		_, off = parseQName(msg, off)
+		off += 4
+	}
+	for i := 0; i < an; i++ {
+		nameOff := off
+		off = skipQName(msg, off)
+		if off+8 > len(msg) {
+			return "", false
+		}
+		typ := binary.BigEndian.Uint16(msg[off : off+2])
+		off += 8
+		rdLen := int(binary.BigEndian.Uint16(msg[off : off+2]))
+		off += 2
+		if typ == 5 { 
+			cn, _ := parseQName(msg, off)
+			_ = nameOff 
+			return cn, true
+		}
+		off += rdLen
+	}
+	return "", false
 }
 
 
-func normalizeDomain(name string) string {
-    name = strings.ToLower(name)
-    return strings.TrimSuffix(name, ".")
+
+func buildDNSQuery(name string, qtype, qclass uint16) []byte {
+	id := uint16(time.Now().UnixNano() & 0xffff)
+	hdr := make([]byte, 12)
+	binary.BigEndian.PutUint16(hdr[0:2], id)
+	binary.BigEndian.PutUint16(hdr[2:4], 0x0100) 
+	binary.BigEndian.PutUint16(hdr[4:6], 1)
+
+	var qname []byte
+	for _, lbl := range strings.Split(name, ".") {
+		qname = append(qname, byte(len(lbl)))
+		qname = append(qname, lbl...)
+	}
+	qname = append(qname, 0)
+
+	q := make([]byte, 4)
+	binary.BigEndian.PutUint16(q[0:2], qtype)
+	binary.BigEndian.PutUint16(q[2:4], qclass)
+
+	return append(append(hdr, qname...), q...)
 }
 
 
-func extractTTL(data []byte) uint32 {
-    if len(data) < 12 {
-        return 0
-    }
+func mergeDNSResponses(base, extra []byte) []byte {
+	baseAn := binary.BigEndian.Uint16(base[6:8])
+	extraAn := binary.BigEndian.Uint16(extra[6:8])
 
-    qdCount := int(binary.BigEndian.Uint16(data[4:6]))
-    anCount := int(binary.BigEndian.Uint16(data[6:8]))
-    offset := 12
+	
+	qd := int(binary.BigEndian.Uint16(base[4:6]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		off = skipQName(base, off)
+		off += 4
+	}
 
-    
-    for i := 0; i < qdCount; i++ {
-        for {
-            if offset >= len(data) {
-                return 0
-            }
-            length := int(data[offset])
-            offset++
-            if length == 0 {
-                break
-            }
-            offset += length
-        }
-        offset += 4 
-    }
+	
+	exOff := 12
+	exQd := int(binary.BigEndian.Uint16(extra[4:6]))
+	for i := 0; i < exQd; i++ {
+		exOff = skipQName(extra, exOff)
+		exOff += 4
+	}
 
-    if anCount == 0 {
-        return 0
-    }
-
-    
-    if offset >= len(data) {
-        return 0
-    }
-
-    if data[offset]&0xC0 == 0xC0 {
-        
-        offset += 2
-    } else {
-        
-        for {
-            if offset >= len(data) {
-                return 0
-            }
-            length := int(data[offset])
-            offset++
-            if length == 0 {
-                break
-            }
-            offset += length
-        }
-    }
-
-    
-    if offset+8 > len(data) {
-        return 0
-    }
-
-    offset += 4 
-
-    
-    return binary.BigEndian.Uint32(data[offset : offset+4])
+	merged := append(base, extra[exOff:]...)
+	binary.BigEndian.PutUint16(merged[6:8], baseAn+extraAn)
+	return merged
 }
 
-func extractCNAME(data []byte) (string, bool) {
-    if len(data) < 12 {
-        return "", false
-    }
-
-    qdCount := int(binary.BigEndian.Uint16(data[4:6]))
-    anCount := int(binary.BigEndian.Uint16(data[6:8]))
-    offset := 12
-
-    
-    for i := 0; i < qdCount; i++ {
-        for {
-            length := int(data[offset])
-            offset++
-            if length == 0 {
-                break
-            }
-            offset += length
-        }
-        offset += 4 
-    }
-
-    
-    for i := 0; i < anCount; i++ {
-        if offset+10 > len(data) {
-            return "", false
-        }
-
-        
-        if data[offset]&0xC0 == 0xC0 {
-            offset += 2
-        } else {
-            for {
-                length := int(data[offset])
-                offset++
-                if length == 0 {
-                    break
-                }
-                offset += length
-            }
-        }
-
-        typ := binary.BigEndian.Uint16(data[offset : offset+2])
-        offset += 8
-
-        rdLength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
-        offset += 2
-
-        if typ == 5 { 
-            cname, _ := parseQName(data, offset)
-            return cname, true
-        }
-
-        offset += rdLength
-    }
-
-    return "", false
-}
-
-func buildDNSQuery(name string, qtype uint16, qclass uint16) []byte {
-    id := uint16(time.Now().UnixNano() & 0xFFFF)
-    header := make([]byte, 12)
-    binary.BigEndian.PutUint16(header[0:2], id)
-    binary.BigEndian.PutUint16(header[2:4], 0x0100) 
-    binary.BigEndian.PutUint16(header[4:6], 1)     
-
-    qname := []byte{}
-    for _, label := range strings.Split(name, ".") {
-        qname = append(qname, byte(len(label)))
-        qname = append(qname, []byte(label)...)
-    }
-    qname = append(qname, 0) 
-
-    question := make([]byte, 4)
-    binary.BigEndian.PutUint16(question[0:2], qtype)
-    binary.BigEndian.PutUint16(question[2:4], qclass)
-
-    return append(append(header, qname...), question...)
-}
-
-func mergeDNSResponses(base []byte, extra []byte) []byte {
-    if len(base) < 12 || len(extra) < 12 {
-        return base
-    }
-
-    
-    baseAn := binary.BigEndian.Uint16(base[6:8])
-    extraAn := binary.BigEndian.Uint16(extra[6:8])
-
-    
-    qdCount := int(binary.BigEndian.Uint16(base[4:6]))
-    offset := 12
-    for i := 0; i < qdCount; i++ {
-        for {
-            length := int(base[offset])
-            offset++
-            if length == 0 {
-                break
-            }
-            offset += length
-        }
-        offset += 4 
-    }
-
-   
-    extraOffset := 12
-    extraQd := int(binary.BigEndian.Uint16(extra[4:6]))
-    for i := 0; i < extraQd; i++ {
-        for {
-            length := int(extra[extraOffset])
-            extraOffset++
-            if length == 0 {
-                break
-            }
-            extraOffset += length
-        }
-        extraOffset += 4
-    }
-
-    
-    extraAnswers := extra[extraOffset:]
-
-    
-    merged := append(base, extraAnswers...)
-
-    
-    totalAnswers := baseAn + extraAn
-    binary.BigEndian.PutUint16(merged[6:8], totalAnswers)
-
-    return merged
-}
 
 
