@@ -1,295 +1,225 @@
 package main
 
 import (
-    "encoding/binary"
-    "fmt"
-    "net"
-    "time"
-    "log"
+	"encoding/binary"
+	"fmt"
+	//"log"
+	"net"
+	"time"
 )
 
+
 var rootServers = []string{
-    "198.41.0.4:53",     // A-root
-    "199.9.14.201:53",   // B-root
-    "192.33.4.12:53",    // C-root
-    "199.7.91.13:53",    // D-root
-    "192.203.230.10:53", // E-root
+	"198.41.0.4:53",   
+	"199.7.91.13:53",  
+	"192.5.5.241:53",  
+	"192.203.230.10:53",
 }
 
 type DNSHeader struct {
-    ID                                 uint16
-    Flags                              uint16
-    QDCount, ANCount, NSCount, ARCount uint16
+	ID                                 uint16
+	Flags                              uint16
+	QDCount, ANCount, NSCount, ARCount uint16
 }
 
 type DNSQuestion struct {
-    Name  string
-    Type  uint16
-    Class uint16
+	Name  string
+	Type  uint16
+	Class uint16
 }
 
-func parseDNSQuery(data []byte) (DNSHeader, DNSQuestion, error) {
-    if len(data) < 12 {
-        return DNSHeader{}, DNSQuestion{}, fmt.Errorf("data too short")
-    }
-
-    header := DNSHeader{
-        ID:      binary.BigEndian.Uint16(data[0:2]),
-        Flags:   binary.BigEndian.Uint16(data[2:4]),
-        QDCount: binary.BigEndian.Uint16(data[4:6]),
-        ANCount: binary.BigEndian.Uint16(data[6:8]),
-        NSCount: binary.BigEndian.Uint16(data[8:10]),
-        ARCount: binary.BigEndian.Uint16(data[10:12]),
-    }
-
-    qname, offset := parseQName(data, 12)
-    if offset+4 > len(data) {
-        return header, DNSQuestion{}, fmt.Errorf("incomplete question section")
-    }
-
-    question := DNSQuestion{
-        Name:  qname,
-        Type:  binary.BigEndian.Uint16(data[offset : offset+2]),
-        Class: binary.BigEndian.Uint16(data[offset+2 : offset+4]),
-    }
-
-    return header, question, nil
+func parseDNSQuery(b []byte) (DNSHeader, DNSQuestion, error) {
+	if len(b) < 12 {
+		return DNSHeader{}, DNSQuestion{}, fmt.Errorf("truncated header")
+	}
+	h := DNSHeader{
+		ID:      binary.BigEndian.Uint16(b[0:2]),
+		Flags:   binary.BigEndian.Uint16(b[2:4]),
+		QDCount: binary.BigEndian.Uint16(b[4:6]),
+		ANCount: binary.BigEndian.Uint16(b[6:8]),
+		NSCount: binary.BigEndian.Uint16(b[8:10]),
+		ARCount: binary.BigEndian.Uint16(b[10:12]),
+	}
+	name, off := parseQName(b, 12)
+	if off+4 > len(b) {
+		return h, DNSQuestion{}, fmt.Errorf("truncated question")
+	}
+	q := DNSQuestion{
+		Name:  name,
+		Type:  binary.BigEndian.Uint16(b[off : off+2]),
+		Class: binary.BigEndian.Uint16(b[off+2 : off+4]),
+	}
+	return h, q, nil
 }
 
-func resolveRecursively(query []byte) ([]byte, error) {
-    currentServers := rootServers
 
-    for i := 0; i < 15; i++ {
-        var lastErr error
 
-        for _, server := range currentServers {
-            log.Println("Querying server:", server)
+func resolveRecursively(q []byte) ([]byte, error) {
+	servers := append([]string(nil), rootServers...)
+	for depth := 0; depth < 15; depth++ {
+		var lastErr error
+		for _, srv := range servers {
+			conn, err := net.Dial("udp", srv)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+			if _, err = conn.Write(q); err != nil {
+				lastErr = err
+				conn.Close()
+				continue
+			}
+			buf := make([]byte, 4096)
+			n, err := conn.Read(buf)
+			conn.Close()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			resp := buf[:n]
+			if binary.BigEndian.Uint16(resp[6:8]) > 0 { 
+				return resp, nil
+			}
 
-            conn, err := net.Dial("udp", server)
-            if err != nil {
-                log.Println("Dial error:", err)
-                lastErr = err
-                continue
-            }
+			glue, ns := extractNextServers(resp)
+			if len(glue) == 0 && len(ns) == 0 {
+				return resp, nil 
+			}
 
-            conn.SetDeadline(time.Now().Add(3 * time.Second))
-            _, err = conn.Write(query)
-            if err != nil {
-                log.Println("Write error:", err)
-                conn.Close()
-                lastErr = err
-                continue
-            }
-
-            buf := make([]byte, 4096)
-            n, err := conn.Read(buf)
-            conn.Close()
-            if err != nil {
-                log.Println("Read error:", err)
-                lastErr = err
-                continue
-            }
-
-            response := buf[:n]
-            log.Printf("Response received (%d bytes)\n", n)
-
-            anCount := binary.BigEndian.Uint16(response[6:8])
-            if anCount > 0 {
-                log.Println("Answer found")
-                return response, nil
-            }
-
-            glueIPs, nsNames := extractNextServers(response)
-            log.Println("Glue IPs:", glueIPs)
-            log.Println("NS Names:", nsNames)
-
-            var newServers []string
-
-            if len(glueIPs) > 0 {
-                newServers = glueIPs
-            } else {
-                for _, ns := range nsNames {
-                    log.Println("Resolving NS:", ns)
-                    nsQuery := buildDNSQuery(ns, 1, 1)
-                    nsResp, err := resolveRecursively(nsQuery)
-                    if err != nil {
-                        continue
-                    }
-                    ip := extractARecord(nsResp)
-                    if ip != "" {
-                        log.Println("Resolved NS IP:", ip)
-                        newServers = append(newServers, ip+":53")
-                    }
-                }
-            }
-
-            if len(newServers) == 0 {
-                return response, nil
-            }
-
-            currentServers = newServers
-            break
-        }
-
-        if len(currentServers) == 0 {
-            return nil, lastErr
-        }
-    }
-
-    return nil, fmt.Errorf("recursion failed")
+			if len(glue) == 0 { 
+				for _, n := range ns {
+					nq := buildDNSQuery(n, 1, 1)
+					r, err := resolveRecursively(nq)
+					if err != nil {
+						continue
+					}
+					if ip := extractARecord(r); ip != "" {
+						glue = append(glue, ip+":53")
+					}
+				}
+			}
+			if len(glue) > 0 {
+				servers = glue
+				break 
+			}
+		}
+		if servers == nil {
+			return nil, lastErr
+		}
+	}
+	return nil, fmt.Errorf("max recursion depth reached")
 }
 
-func extractNextServers(resp []byte) (ips []string, names []string) {
-    if len(resp) < 12 {
-        return
-    }
 
-    qdCount := int(binary.BigEndian.Uint16(resp[4:6]))
-    anCount := int(binary.BigEndian.Uint16(resp[6:8]))
-    nsCount := int(binary.BigEndian.Uint16(resp[8:10]))
-    arCount := int(binary.BigEndian.Uint16(resp[10:12]))
 
-    offset := 12
-    for i := 0; i < qdCount; i++ {
-        offset = skipQName(resp, offset)
-        offset += 4
-    }
+func extractNextServers(resp []byte) (ips, names []string) {
+	qd := int(binary.BigEndian.Uint16(resp[4:6]))
+	an := int(binary.BigEndian.Uint16(resp[6:8]))
+	ns := int(binary.BigEndian.Uint16(resp[8:10]))
+	ar := int(binary.BigEndian.Uint16(resp[10:12]))
 
-    for i := 0; i < anCount; i++ {
-        offset = skipRR(resp, offset)
-    }
-
-    for i := 0; i < nsCount; i++ {
-        start := offset
-        offset = skipRR(resp, offset)
-        if offset == -1 || start+12 > len(resp) {
-            continue
-        }
-
-        rrType := binary.BigEndian.Uint16(resp[start+2 : start+4])
-        if rrType == 2 {
-            nsName := extractName(resp, start+12)
-            if nsName != "" {
-                names = append(names, nsName)
-            }
-        }
-    }
-
-    for i := 0; i < arCount; i++ {
-        start := offset
-        offset = skipRR(resp, offset)
-        if offset == -1 || start+12 > len(resp) {
-            continue
-        }
-
-        rrType := binary.BigEndian.Uint16(resp[start+2 : start+4])
-        if rrType == 1 {
-            rdLength := int(binary.BigEndian.Uint16(resp[start+10 : start+12]))
-            rdata := resp[start+12 : start+12+rdLength]
-            if len(rdata) == 4 {
-                ip := net.IP(rdata).String()
-                ips = append(ips, ip+":53")
-            }
-        }
-    }
-
-    return
+	off := 12
+	for i := 0; i < qd; i++ {
+		off = skipQName(resp, off) + 4
+	}
+	for i := 0; i < an; i++ {
+		off = skipRR(resp, off)
+	}
+	for i := 0; i < ns; i++ {
+		start := off
+		off = skipRR(resp, off)
+		if start+12 > len(resp) {
+			continue
+		}
+		if binary.BigEndian.Uint16(resp[start+2:start+4]) == 2 { // NS
+			if n := extractName(resp, start+12); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	for i := 0; i < ar; i++ {
+		start := off
+		off = skipRR(resp, off)
+		if start+12 > len(resp) {
+			continue
+		}
+		if binary.BigEndian.Uint16(resp[start+2:start+4]) == 1 { // A
+			l := int(binary.BigEndian.Uint16(resp[start+10 : start+12]))
+			if start+12+l <= len(resp) {
+				ips = append(ips, net.IP(resp[start+12:start+12+l]).String()+":53")
+			}
+		}
+	}
+	return
 }
 
-func skipRR(data []byte, offset int) int {
-    if offset+10 > len(data) {
-        return -1
-    }
-
-    offset = skipQName(data, offset)
-    if offset+10 > len(data) {
-        return -1
-    }
-
-    rdlength := int(binary.BigEndian.Uint16(data[offset+8 : offset+10]))
-    offset += 10 + rdlength
-    return offset
+func skipRR(b []byte, off int) int {
+	off = skipQName(b, off)
+	if off+10 > len(b) {
+		return len(b)
+	}
+	l := int(binary.BigEndian.Uint16(b[off+8 : off+10]))
+	return off + 10 + l
 }
 
-func skipQName(data []byte, offset int) int {
-    for {
-        if offset >= len(data) {
-            return -1
-        }
-        length := int(data[offset])
-        if length == 0 {
-            return offset + 1
-        }
-        if length&0xC0 == 0xC0 {
-            return offset + 2
-        }
-        offset += length + 1
-    }
+func skipQName(b []byte, off int) int {
+	for {
+		if off >= len(b) {
+			return len(b)
+		}
+		l := int(b[off])
+		if l == 0 {
+			return off + 1
+		}
+		if l&0xc0 == 0xc0 { 
+			return off + 2
+		}
+		off += l + 1
+	}
 }
 
-func extractName(data []byte, offset int) string {
-    var name string
-    for {
-        if offset >= len(data) {
-            return ""
-        }
-        length := int(data[offset])
-        if length&0xC0 == 0xC0 {
-            if offset+1 >= len(data) {
-                return ""
-            }
-            pointer := int(binary.BigEndian.Uint16(data[offset:offset+2]) & 0x3FFF)
-            suffix := extractName(data, pointer)
-            if suffix != "" {
-                if name != "" {
-                    name += "."
-                }
-                name += suffix
-            }
-            return name
-        }
-        if length == 0 {
-            offset++
-            break
-        }
-        offset++
-        if offset+length > len(data) {
-            return ""
-        }
-        if name != "" {
-            name += "."
-        }
-        name += string(data[offset : offset+length])
-        offset += length
-    }
-    return name
+func extractName(b []byte, off int) string {
+	var out string
+	for {
+		if off >= len(b) {
+			return ""
+		}
+		l := int(b[off])
+		if l&0xc0 == 0xc0 {
+			ptr := int(binary.BigEndian.Uint16(b[off:off+2]) & 0x3fff)
+			return out + extractName(b, ptr)
+		}
+		if l == 0 {
+			break
+		}
+		off++
+		if off+l > len(b) {
+			return ""
+		}
+		if out != "" {
+			out += "."
+		}
+		out += string(b[off : off+l])
+		off += l
+	}
+	return out
 }
 
-func extractARecord(resp []byte) string {
-    offset := 12
-    qdCount := int(binary.BigEndian.Uint16(resp[4:6]))
-    for i := 0; i < qdCount; i++ {
-        offset = skipQName(resp, offset)
-        offset += 4
-    }
-
-    for offset < len(resp) {
-        if offset+12 > len(resp) {
-            return ""
-        }
-        rrType := binary.BigEndian.Uint16(resp[offset+2 : offset+4])
-        if rrType == 1 {
-            rdLength := int(binary.BigEndian.Uint16(resp[offset+10 : offset+12]))
-            rdata := resp[offset+12 : offset+12+rdLength]
-            if len(rdata) == 4 {
-                return net.IP(rdata).String()
-            }
-        }
-        offset = skipRR(resp, offset)
-        if offset == -1 {
-            return ""
-        }
-    }
-    return ""
+func extractARecord(msg []byte) string {
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		off = skipQName(msg, off) + 4
+	}
+	for off+12 <= len(msg) {
+		if binary.BigEndian.Uint16(msg[off+2:off+4]) == 1 {
+			l := int(binary.BigEndian.Uint16(msg[off+10 : off+12]))
+			if off+12+l <= len(msg) {
+				return net.IP(msg[off+12 : off+12+l]).String()
+			}
+		}
+		off = skipRR(msg, off)
+	}
+	return ""
 }
-
