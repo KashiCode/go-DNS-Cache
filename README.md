@@ -4,7 +4,7 @@
 
 | Area | Features |
 |------|----------------------|
-| **UDP/TCP** | Listens to UDP **and** TCP requests on `0.0.0.0:8053`. Query with `dig @127.0.0.1 -p 8053 example.com A` OR `dig @127.0.0.1 -p 8053 example.com AAAA` OR `dig @127.0.0.1 -p 8053 www.ietf.org`  |
+| **UDP/TCP** | Listens to UDP **and** TCP requests on `0.0.0.0:8053`. Query with `dig @127.0.0.1 -p 8053 example.com A` OR `dig @127.0.0.1 -p 8053 example.com AAAA` OR `dig @127.0.0.1 -p 8053 www.macports.org`  |
 | **Recursive resolution** | Recursive algorithm that starts at the root → follows NS delegation → stops when an answer RR-set is found or 15 hops are exceeded. |
 | **TTL Caching** | In-memory map keyed by `<domain>:<type>` with per-entry TTL eviction.|
 | **De-duplication** | `Deduper` collapses any concurrent identical lookups.|
