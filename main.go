@@ -74,6 +74,8 @@ func tcpServe(c net.Conn, cache *DNSCache, d *Deduper) {
 		return
 	}
 
+    log.Printf("TCP query %d bytes from %s", l, c.RemoteAddr())
+
 	resp := handleQuery(req, cache, d)
 	if resp == nil {
 		return
@@ -87,7 +89,7 @@ func tcpServe(c net.Conn, cache *DNSCache, d *Deduper) {
 func handleQuery(req []byte, cache *DNSCache, d *Deduper) []byte {
 	start := time.Now()
 
-	// We only need the parsed question for logging & cache-key purposes.
+	
 	_, q, err := parseDNSQuery(req)
 	if err != nil {
 		return nil
