@@ -46,33 +46,42 @@ func extractTTL(msg []byte) uint32 {
 	return binary.BigEndian.Uint32(msg[off+4 : off+8])
 }
 
+
+
 func extractCNAME(msg []byte) (string, bool) {
 	qd := int(binary.BigEndian.Uint16(msg[4:6]))
 	an := int(binary.BigEndian.Uint16(msg[6:8]))
+
 	off := 12
+	
 	for i := 0; i < qd; i++ {
-		_, off = parseQName(msg, off)
-		off += 4
+		off = skipQName(msg, off) + 4 
 	}
+
+	
 	for i := 0; i < an; i++ {
-		nameOff := off
 		off = skipQName(msg, off)
 		if off+8 > len(msg) {
 			return "", false
 		}
 		typ := binary.BigEndian.Uint16(msg[off : off+2])
-		off += 8
+		off += 8                              
 		rdLen := int(binary.BigEndian.Uint16(msg[off : off+2]))
-		off += 2
+		off += 2                              
+
 		if typ == 5 { 
-			cn, _ := parseQName(msg, off)
-			_ = nameOff 
-			return cn, true
+			target := extractName(msg, off)
+			if target != "" {
+				return target, true
+			}
+			return "", false
 		}
-		off += rdLen
+		off += rdLen 
 	}
 	return "", false
 }
+
+
 
 
 
