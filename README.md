@@ -2,7 +2,7 @@
 
 ![image](https://github.com/user-attachments/assets/06e66e74-798a-45b0-8192-e455a9fb7fa7)
 
-| Area | Features |
+| Feature | Explaination |
 |------|----------------------|
 | **UDP/TCP** | Listens to UDP **and** TCP requests on `0.0.0.0:8053`. Query with `dig @127.0.0.1 -p 8053 example.com A` OR `dig @127.0.0.1 -p 8053 example.com AAAA` OR `dig @127.0.0.1 -p 8053 www.macports.org`  |
 | **Recursive resolution** | Recursive algorithm that starts at the root → follows NS delegation → stops when an answer RR-set is found or 15 hops are exceeded. |
