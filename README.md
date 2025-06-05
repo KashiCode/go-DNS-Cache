@@ -10,7 +10,7 @@
 | **NXDOMAIN**     | `dig @127.0.0.1 -p 8053 no-such-host-1234.com A`                                  | `dig @127.0.0.1 -p 8053 no-such-host-1234.com A +tcp` |
 | **Root NS list**      | `dig @127.0.0.1 -p 8053 . NS`                                                     | `dig @127.0.0.1 -p 8053 . NS +tcp`                    |
 | **TXT record**        | `dig @127.0.0.1 -p 8053 _dmarc.google.com TXT`                                    | `dig @127.0.0.1 -p 8053 _dmarc.google.com TXT +tcp`   |
-| **Concurrency deduplication**  | `for i in {1..8}; do dig @127.0.0.1 -p 8053 wikipedia.org A & done; wait` | same loop with `+tcp` added                           |
+| **Concurrency deduplication**  | `for i in {1..8}; do dig @127.0.0.1 -p 8053 wikipedia.org A & done; wait` | `+tcp` added                           |
 
 | Feature | Explaination |
 |------|----------------------|
