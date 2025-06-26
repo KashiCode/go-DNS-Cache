@@ -2,7 +2,7 @@
 
 ![image](https://github.com/user-attachments/assets/06e66e74-798a-45b0-8192-e455a9fb7fa7)
 
-| Query            | UDP command                                                                       | TCP command ( `+tcp`)                              |
+| Query            | UDP command                                                                       | TCP command ( `+tcp`)                               |
 | --------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | **IPv4 lookup**       | `dig @127.0.0.1 -p 8053 example.com A`                                            | `dig @127.0.0.1 -p 8053 example.com A +tcp`           |
 | **IPv6 lookup**       | `dig @127.0.0.1 -p 8053 example.com AAAA`                                         | `dig @127.0.0.1 -p 8053 example.com AAAA +tcp`        |
